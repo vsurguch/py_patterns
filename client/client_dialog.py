@@ -1,9 +1,7 @@
 
 import abc
-import json
 from utils.message_ import *
 from server.clinic import Clinic
-
 
 monkey_clinic = Clinic()
 
@@ -21,7 +19,6 @@ def monkey_patch_clint_server(request):
 #         'data': {}
 #     }
 # }
-
 
 
 class User:
@@ -50,14 +47,17 @@ class BasicAction(Action):
             self._msg_body_data = required_data
         self.get_msg_body_data()
 
-    def get_msg_body_data(self):
-        self.msg_body = MessageBuilder2(self._msg_body_data).build()
-
     def set_request_type(self, value):
         pass
 
+    def get_msg_body_data(self):
+        self.msg_body = MessageBuilder2(self._msg_body_data).build()
+
     def act(self):
-        msg = Message(self.user.session_id, self._msg_type, self.request_id, self.msg_body)
+        msg = Message(self.user.session_id,
+                      self._msg_type,
+                      self.request_id,
+                      self.msg_body)
         raw_resp = self.gateway(msg.json())
         resp = Message().from_json(raw_resp)
         if 'result' in resp.data:
@@ -152,7 +152,8 @@ class Dialog:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, gateway=monkey_patch_clint_server, choice_func=get_from_console):
+    def __init__(self, gateway=monkey_patch_clint_server,
+                 choice_func=get_from_console):
 
         # gateway - это клиент - сокет, который будет отправлять сообщение и возвращать ответ от сервера
         # monkey_patch_client_server - заглушка имитирующая передачу по сети и получение ответа
@@ -178,8 +179,6 @@ class Dialog:
         if self.user.autherized:
             Action = self.get_action('get_actions')
             resp = Action(self.gateway, self.user).act()
-
-            print(self.user.actions)
 
     def run(self):
         while True:

@@ -2,33 +2,44 @@
 import abc
 from utils.message_ import Message
 
+
+USERS = {
+    'admin': '123',
+    'guest': '123',
+}
+
+
 class ProcessorComponent(metaclass=abc.ABCMeta):
+
     @abc.abstractstaticmethod
     def do(request_id, request_data, final_data):
         pass
 
 
 class GetDate(ProcessorComponent):
+
     @staticmethod
     def do(request_id, request_data, final_data):
         resp = {}
         resp['required_data'] = ['Date']
-        final_data['Date'] = ''
         resp['result'] = 'Enter desired date'
+        final_data['Date'] = ''
         return resp
 
 
 class GetDoctor(ProcessorComponent):
+
     @staticmethod
     def do(request_id, request_data, final_data):
         resp = {}
         resp['required_data'] = ['Doctor']
-        final_data['Doctor'] = ''
         resp['result'] = 'Enter doctor\'s name'
+        final_data['Doctor'] = ''
         return resp
 
 
 class MakeAppointment(ProcessorComponent):
+
     @staticmethod
     def do(request_id, request_data, final_data):
         resp = {}
@@ -80,6 +91,7 @@ class ReturnActions(ProcessorComponent):
 
 
 class Generic(ProcessorComponent):
+
     @staticmethod
     def do(request_id, request_data, final_data):
         resp = {'status_code': 200}
@@ -138,14 +150,7 @@ class ProcessorBuilder:
         processor = Processor(request_id, request_data, components=ProcessorBuilder._components[request_type])
         return processor
 
-
-USERS = {
-    'admin': '123',
-    'guest': '123',
-}
-
-
-# Mediator (singleton)
+# Dispatcher (singleton)
 
 class Dispatcher:
 
@@ -154,13 +159,11 @@ class Dispatcher:
     _requests_in_progress = {}
 
     def __new__(cls, *args, **kwargs):
-
         if not cls._instance:
             cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
-
         self.processor_builder = ProcessorBuilder
         self._observers = {}
 
@@ -170,9 +173,6 @@ class Dispatcher:
         request_id = msg.request_id
         request_type = msg.request_type
         request_data = msg.data
-
-        # print('request', request_id, request_type)
-        # print(Dispatcher._requests_in_progress)
 
         if not request_id: #and request_id not in self.requests_in_progress:
             processor = self.processor_builder.build(msg)
@@ -207,10 +207,8 @@ class Dispatcher:
         for observer in self._observers[action]:
             observer.notify(data)
 
-    def process_request(self, request_id):
-
-        pass
-
-    def response(self, request_id):
-
-        pass
+    # def process_request(self, request_id):
+    #     pass
+    #
+    # def response(self, request_id):
+    #     pass

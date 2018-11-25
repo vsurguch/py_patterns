@@ -1,8 +1,8 @@
 
 
 class Schedule():
-    _instance = None
 
+    _instance = None
     _appointments = []
 
     def __new__(cls, *args, **kwargs):
@@ -11,5 +11,6 @@ class Schedule():
         return cls._instance
 
     def notify(self, data):
-        print('notification')
+        print('notification: ', data)
+        self._appointments.append(data)
 
