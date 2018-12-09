@@ -15,9 +15,24 @@ def execute_statement(cursor, statement):
 
 class Engine:
 
-    def __init__(self, db_name):
+    def __init__(self, db_name, verbose=True):
         self.connection = sqlite3.connect(db_name)
         self.cursor = self.connection.cursor()
+        self.verbose = verbose
+
+    def execute(self, statement):
+        if self.verbose:
+            print(statement)
+        self.cursor.execute(statement)
+
+    def execute_statement(self, statement):
+        self.execute(statement)
+        result = self.cursor.fetchall()
+        return result
+
+    def get_description(self):
+        desc = [field[0] for field in self.cursor.description ]
+        return desc
 
 # ------------------------------------------
 
@@ -30,7 +45,6 @@ class MapperRegistry:
     @staticmethod
     def register_model(model):
         __class__.models[model._model_name] = model
-        cursor = __class__.engine.cursor
         model.engine = __class__.engine
         fields_list = []
         for key, value in model.fields.items():
@@ -38,8 +52,7 @@ class MapperRegistry:
 
         fields_definition = ', '.join(fields_list)
         statement = 'CREATE TABLE IF NOT EXISTS {} ({})'.format(model._model_name, fields_definition)
-        print(statement)
-        execute_statement(cursor, statement)
+        __class__.engine.execute_statement(statement)
 
     @staticmethod
     def get_model(obj):
@@ -112,6 +125,7 @@ class Field:
     params = ''
     default = None
     autoincrement = False
+    foreign = False
 
     def __get__(self, obj, type=None):
         return obj._data[self._name]
@@ -164,11 +178,73 @@ class CharField(Field):
 
 
 class ForeignKeyField(Field):
+    foreign = True
 
     def __init__(self, model, field):
-        self._refernece_model = model
+        self._reference_model = model
         self._reference_field = field
-        self.params = 'REFERENCES {}({})'.format(self._refernece_model, self._reference_field)
+        self.params = 'REFERENCES {}({})'.format(self._reference_model._model_name, self._reference_field)
+
+    def __set__(self, obj, value):
+        if isinstance(value, Model):
+            super().__set__(obj, value)
+
+
+class Query:
+    def __init__(self, model):
+        self._model = model
+        self.fields = self._model.get_fields(with_autoincrement=True)
+        self.foreign = self._model.get_foreign_keys(self.fields)
+
+    def make_statement(self):
+        statement = 'SELECT * FROM {} '.format(self._model._model_name)
+        if len(self.foreign) > 0:
+            for foreign in self.foreign:
+                ref_model_name = foreign['model']._model_name
+                statement += ' LEFT OUTER JOIN {} ON {}.{} = {}.{}'.\
+                    format(ref_model_name, self._model._model_name, foreign['field'],
+                           ref_model_name, foreign['ref_field'])
+        statement += '$condition$'
+        return statement
+
+    def query(self, statement):
+        results = self._model.engine.execute_statement(statement)
+        desc = self._model.engine.get_description()
+        return results, desc
+
+    def all(self):
+        result = []
+        statement = self.make_statement()
+        statement = statement.replace('$condition$', '')
+        query_results, fields = self.query(statement)
+        for res in query_results:
+            obj = self._model.obj_from_result(self.fields, fields, res)
+            result.append(obj)
+        return result
+
+    def _filter(self, field_name, value):
+        condition = " WHERE {}.{}=\'{}\' ".format(self._model._model_name, field_name, value)
+        statement = self.make_statement()
+        statement = statement.replace('$condition$', condition)
+        results, fields = self.query(statement)
+        return results, fields
+
+    def filter(self, field_name, value):
+        query_results, fields = self._filter(field_name, value)
+        result = self._model.list_from_result(self.fields, fields, query_results)
+        return result
+
+    def first(self, field_name, value):
+        results, fields = self._filter(field_name, value)
+        if results and len(results) > 0:
+            result = self._model.obj_from_result(self.fields, fields, results[0])
+            return result
+        else:
+            return None
+
+    def find_by_id(self, id):
+        result = self.first('id', id)
+        return result
 
 
 class DomainObject:
@@ -181,7 +257,6 @@ class DomainObject:
 
     def mark_deleted(self):
         UnitOfWork.get_current().register_deleted(self)
-
 
 
 class Model(DomainObject):
@@ -208,91 +283,124 @@ class Model(DomainObject):
 
     def __setattr__(self, key, value):
         if key in self._data:
+            if self.__class__.fields[key].foreign and (not isinstance(value, Model)):
+                model = self.__class__.fields[key]._reference_model
+                field = self.__class__.fields[key]._reference_field
+                obj = Query(model).first(field, value)
+                value = obj
             self.__class__.fields[key].__set__(self, value)
-
-    @classmethod
-    def obj_from_result(cls, result):
-        print(result)
-        fields = cls.get_fields(with_autoincrement=True)
-        fields_dict = dict(zip(fields, result))
-        obj = cls(**fields_dict)
-        return obj
-
-    @classmethod
-    def filter(cls, field_name, value):
-        table_name = cls._model_name
-        condition = "{}=\'{}\'".format(field_name, value)
-        statement = 'SELECT * FROM {} WHERE {}'.format(table_name, condition)
-        cls.engine.cursor.execute(statement)
-        results = cls.engine.cursor.fetchall()
-        return results
-
-    @classmethod
-    def filter_by(cls, field_name, value):
-        results = cls.filter(field_name, value)
-        return [cls.obj_from_result(result) for result in results]
-
-    @classmethod
-    def first(cls, field_name, value):
-        results = cls.filter(field_name, value)
-        if len(results) > 0:
-            return cls.obj_from_result(results[0])
-
-    @classmethod
-    def all(cls):
-        table_name = cls._model_name
-        statement = 'SELECT * FROM {}'.format(table_name)
-        cls.engine.cursor.execute(statement)
-        results = cls.engine.cursor.fetchall()
-        # if results:
-        fields = cls.get_fields(with_autoincrement=True)
-        objects_list = []
-        for result in results:
-            fields_dict = dict(zip(fields, result))
-            objects_list.append(cls(**fields_dict))
-        return objects_list
-        # else:
-        #     return None
-
-    @classmethod
-    def filter_by_id(cls, id):
-        table_name = cls._model_name
-        condition = "{}=\'{}\'".format('id', id)
-        statement = 'SELECT * FROM {} WHERE {}'.format(table_name, condition)
-        cls.engine.cursor.execute(statement)
-        result = cls.engine.cursor.fetchall()
-        if result:
-            fields = cls.get_fields(with_autoincrement=True)
-            fields_dict = dict(zip(fields, result[0]))
-            obj = cls(**fields_dict)
-            return obj
-        else:
-            return None
 
     @classmethod
     def get_fields(cls, with_autoincrement=False):
         if with_autoincrement:
-            result = [key for key in cls.fields.keys()]
+            fields = [key for key in cls.fields.keys()]
         else:
-            result = [key for key in cls.fields.keys() if not cls.fields[key].autoincrement]
+            fields = [key for key in cls.fields.keys() if not cls.fields[key].autoincrement]
+        return fields
+
+    @classmethod
+    def get_foreign_keys(self, fields):
+        foreign_keys = []
+        for field in fields:
+            if isinstance(self.fields[field], ForeignKeyField):
+                foreign = {
+                    'model': self.fields[field]._reference_model,
+                    'field': field,
+                    'ref_field': self.fields[field]._reference_field,
+                }
+                foreign_keys.append(foreign)
+        return foreign_keys
+
+    def get_field_values(self, fields):
+        result = {}
+        for field in fields:
+            if isinstance(self.fields[field], ForeignKeyField):
+                obj = self._data[field]
+                if obj:
+                    value = obj._data[self.fields[field]._reference_field]
+                    value = '\'{}\''.format(value)
+                else:
+                    value = 'NULL'
+                result[field] = value
+            else:
+                result[field] = '\'{}\''.format(self._data[field])
         return result
 
+    # другая реализация предыдущеего метода ()
     def get_values_for_fields(self, fields):
-        result = ['\'{}\''.format(self._data[field]) for field in fields]
+        result = []
+        for field in fields:
+            if isinstance(self.fields[field], ForeignKeyField):
+                obj = self._data[field]
+                if obj:
+                    value = obj._data[self.fields[field]._reference_field]
+                    value = '\'{}\''.format(value)
+                else:
+                    value = 'NULL'
+                result.append(value)
+            else:
+                result.append('\'{}\''.format(self._data[field]))
+        # result = ['\'{}\''.format(self._data[field]) for field in fields]
         return result
 
+    # добавление записи в БД напрямую
+    def add(self):
+        lastrow = self.__class__.insert(self)
+        if lastrow:
+            return Query(self.__class__).find_by_id(lastrow)
+        else:
+            return None
+
+    # составление словаря(поле-значение) из результата полученного с помощью sql-запроса
+    @classmethod
+    def make_fields_dict(cls, fields, result_fields, values):
+        field_l = len(cls.fields)
+        start = field_l
+        result = dict()
+        # print(fields, result_fields, values)
+        for n, field in enumerate(fields):
+            if isinstance(cls.fields[field], ForeignKeyField):
+                foreign_length = len(cls.fields[field]._reference_model.fields)
+                to = start + foreign_length
+                obj_dict = dict(zip(result_fields[start:to], values[start:to]))
+                obj = cls.fields[field]._reference_model(**obj_dict)
+                result[field] = obj
+                start = to
+            else:
+                result[field] = values[n]
+        return result
+
+    # составление объекта из резульата полученного из БД
+    @classmethod
+    def obj_from_result(cls, fields, result_fields, result):
+        fields_dict = cls.make_fields_dict(fields, result_fields, result)
+        # fields_dict = dict(zip(fields, result))
+        obj = cls(**fields_dict)
+        return obj
+
+    # составление списка объектов
+    @classmethod
+    def list_from_result(cls, fields, result_fields, query_result):
+        result = []
+        for res in query_result:
+            obj = cls.obj_from_result(fields, result_fields, res)
+            result.append(obj)
+        return result
+
+    # добавление записи в БД
     @classmethod
     def insert(cls, obj):
         table_name = cls._model_name
         fields = obj.get_fields()
-        values = obj.get_values_for_fields(fields)
-        fields_str = ', '.join(fields)
-        values_str = ', '.join(values)
+        fields_values = obj.get_field_values(fields)
+        fields_str = ', '.join(fields_values.keys())
+        values_str = ', '.join(fields_values.values())
         statement = 'INSERT INTO {} ({}) VALUES ({})'.format(table_name, fields_str, values_str)
-        print(statement)
-        cls.engine.cursor.execute(statement)
+        cls.engine.execute(statement)
+        lastrowid = cls.engine.cursor.lastrowid
         try:
             cls.engine.connection.commit()
+            return lastrowid
         except:
             pass
 
@@ -305,8 +413,7 @@ class Model(DomainObject):
         fields_values = ', '.join(['{}={}'.format(item[0], item[1]) for item in field_value])
         condition = 'id={}'.format(obj.id)
         statement = 'UPDATE {} SET {} WHERE {}'.format(table_name, fields_values, condition)
-        print(statement)
-        cls.engine.cursor.execute(statement)
+        cls.engine.execute(statement)
         try:
             cls.engine.connection.commit()
         except:
@@ -317,8 +424,7 @@ class Model(DomainObject):
         table_name = cls._model_name
         condition = 'id={}'.format(obj.id)
         statement = 'DELETE FROM {} WHERE {}'.format(table_name, condition)
-        print(statement)
-        cls.engine.cursor.execute(statement)
+        cls.engine.execute(statement)
         try:
             cls.engine.connection.commit()
         except:
@@ -328,13 +434,30 @@ class Model(DomainObject):
         return ', '.join(['{}: {}'.format(key, value) for key, value in self._data.items()])
 
 
-class Profession(Model):
-    _model_name = 'Profession'
+# --------------------------------
+# реализация
+
+class Categroy(Model):
+    _model_name = 'Category'
     fields = {
         'id': IntField(not_null=True, primary_key=True, autoincrement=True),
         'name': CharField()
     }
 
+class Profession(Model):
+    _model_name = 'Profession'
+    fields = {
+        'id': IntField(not_null=True, primary_key=True, autoincrement=True),
+        'name': CharField(),
+        'category': ForeignKeyField(Categroy, 'id')
+    }
+
+class City(Model):
+    _model_name = 'City'
+    fields = {
+        'id': IntField(not_null=True, primary_key=True, autoincrement=True),
+        'name': CharField()
+    }
 
 class Person(Model):
     _model_name = 'Person'
@@ -342,7 +465,8 @@ class Person(Model):
         'id': IntField(not_null=True, primary_key=True, autoincrement=True),
         'name': CharField(),
         'age': IntField(),
-        'profession': ForeignKeyField('Profession', 'id')
+        'city': ForeignKeyField(City, 'id'),
+        'profession': ForeignKeyField(Profession, 'id')
     }
 
 
@@ -350,74 +474,59 @@ def main():
     engine = Engine('database.sqlite')
 
     MapperRegistry.set_engine(engine)
-
+    MapperRegistry.register_model(Categroy)
     MapperRegistry.register_model(Profession)
+    MapperRegistry.register_model(City)
     MapperRegistry.register_model(Person)
-
-    res = Person.all()
-    for item  in res:
-        print(item)
 
     UnitOfWork().new_current()
 
-    profession1 = Profession(name='Manager')
-    profession1.mark_new()
-    profession2 = Profession(name='Developer')
-    profession2.mark_new()
+    cat1 = Categroy(name='Top').add()
 
+    prof1 = Profession(name='CEO', category=cat1).add()
+    print(prof1)
+    city_la= City(name='LA').add()
+    city_moscow = City(name='Moscow').add()
+    print(city_la)
 
-    UnitOfWork().get_current().commit()
-    manager = Profession.first('name', 'Manager')
-    developer = Profession.first('name', 'Developer')
-
-    person = Person(name='Aleksei', age=20, profession=manager.id)
+    person = Person(name='Aleksei', age=30, city=city_la, profession=prof1)
     person.mark_new()
-    person2 = Person(name='Boris', age=30, profession=developer.id)
-    person2.mark_new()
 
     UnitOfWork().get_current().commit()
 
-    res = Profession.all()
-    gen = (print(prof) for prof in res)
-    for _ in gen:
-        pass
+    persons = Query(Person).all()
+    print(persons)
+    print(persons[0])
+    print(persons[0].profession)
+    print(persons[0].profession.category)
+    persons[0].city = city_moscow
+    persons[0].mark_changed()
 
-    res = Person.all()
-    gen = (print(person) for person in res)
-    for _ in gen:
-        pass
+    UnitOfWork().get_current().commit()
+
+    aleksei = Query(Person).filter('name', 'Aleksei')
+    if len(aleksei) > 0:
+        aleksei = aleksei[0]
+        print(aleksei)
+
+
+    #
+
+    # gen = (print(prof) for prof in res)
+    # for _ in gen:
+    #     pass
+    #
+    # res = Person.all()
+    # gen = (print(person) for person in res)
+    # for _ in gen:
+    #     pass
+    #
 
     UnitOfWork().set_current(None)
 
 if __name__ == '__main__':
     main()
 
-# person = Person(name='Aleksei', age=10)
-# person.mark_new()
-# person2 = Person(name='Boris', age=11)
-# person2.mark_new()
-# person3 = Person(name='Cynthia', age=12)
-# person3.mark_new()
-# person4 = Person(name='David', age=13)
-# person4.mark_new()
-# person5 = Person(name='Eva', age=13)
-# person5.mark_new()
-
-# person6.name = 'Dmitrii'
-# person4.mark_changed()
-#
-# person5.mark_deleted()
-#
-
-
-
-
-# person = Person.filter_by_id(1)
-# person.name = 'Martin'
-# Person.update(person)
-#
-# person = Person.filter_by_id(2)
-# Person.delete(person)
 
 
 # res = execute_statement(MapperRegistry.engine.cursor, 'SELECT * FROM Person')
